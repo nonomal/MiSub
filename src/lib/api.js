@@ -1,32 +1,120 @@
 //
 // src/lib/api.js
 //
-export async function fetchInitialData() {
-    try {
-        const response = await fetch('/api/data');
-        if (!response.ok) {
-            console.error("Session invalid or API error, status:", response.status);
-            return null;
+
+import { api, APIError } from './http.js';
+import { t } from '../i18n/index.js';
+
+/**
+ * 统一的 API 错误处理辅助函数
+ * @param {Error} error - 错误对象
+ * @param {string} context - 错误上下文
+ * @returns {Object} 标准错误响应
+ */
+function handleApiError(error, context = '') {
+    console.error(`[API Error - ${context}]`, error);
+
+    let errorType = 'unknown';
+    let errorMessage = t('subscriptions.unknownError');
+
+    let status = null;
+
+    if (error instanceof APIError) {
+        status = error.status;
+        if (error.status === 401) {
+            errorType = 'auth';
+            errorMessage = t('settings.authFailedRelogin');
+        } else {
+            errorType = 'server';
+            const message = error.message || `HTTP ${error.status}`;
+            errorMessage = formatHttpErrorMessage(error.status, message);
         }
-        // 后端已经更新，会返回 { misubs, profiles, config }
-        return await response.json();
+    } else if (error.name === 'AbortError') {
+        errorType = 'timeout';
+        errorMessage = t('settings.requestTimeout');
+    } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        errorType = 'network';
+        errorMessage = t('settings.networkFailedGeneric');
+    } else if (error.message === 'UNAUTHORIZED') {
+        errorType = 'auth';
+        errorMessage = t('settings.authFailedRelogin');
+    } else if (error.message.includes('HTTP')) {
+        errorType = 'server';
+        errorMessage = error.message;
+    } else if (error.name === 'SyntaxError') {
+        errorType = 'server';
+        errorMessage = t('settings.serverResponseInvalid');
+    } else {
+        errorMessage = error.message || t('settings.operationFailed');
+    }
+
+    return {
+        success: false,
+        error: errorMessage,
+        errorType: errorType,
+        status,
+    };
+}
+
+function extractHttpStatus(message = '') {
+    const match = String(message).match(/HTTP\s+(\d{3})/i);
+    return match ? Number(match[1]) : null;
+}
+
+function formatHttpErrorMessage(status, message = '') {
+    const normalizedMessage = String(message || '').trim();
+    if (!status) return normalizedMessage;
+    if (new RegExp(`^HTTP\\s+${status}\\b`, 'i').test(normalizedMessage)) {
+        return normalizedMessage;
+    }
+    return `HTTP ${status}: ${normalizedMessage || `HTTP ${status}`}`;
+}
+
+function normalizeApiFailure(data, fallbackMessage = t('settings.operationFailed')) {
+    const error = data?.error || data?.message || fallbackMessage;
+    const status = data?.status || extractHttpStatus(error);
+    return {
+        success: false,
+        error,
+        errorType: data?.errorType || (status ? 'server' : 'unknown'),
+        status,
+        data,
+    };
+}
+export async function fetchInitialData() {
+    let timeoutId;
+    try {
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 8000); // 8秒超时
+
+        const data = await api.get('/api/data', { signal: controller.signal });
+
+        // 检查新的认证状态响应 (200 OK with authenticated: false)
+        if (data && data.authenticated === false) {
+            return { success: false, error: t('settings.authFailedRelogin'), errorType: 'auth' };
+        }
+
+        return { success: true, data };
     } catch (error) {
-        console.error("Failed to fetch initial data:", error);
-        return null;
+        return handleApiError(error, 'fetchInitialData');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
 export async function login(password) {
     try {
-        const response = await fetch('/api/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password })
-        });
-        return response;
+        const data = await api.post('/api/login', { password });
+        return { success: true, data };
     } catch (error) {
-        console.error("Login request failed:", error);
-        return { ok: false, error: '网络请求失败' };
+        if (error instanceof APIError && error.status === 401) {
+            return {
+                success: false,
+                error: error.data?.message || error.data?.error || t('settings.loginFailed'),
+                errorType: 'auth',
+            };
+        }
+        return handleApiError(error, 'login');
     }
 }
 
@@ -35,91 +123,97 @@ export async function saveMisubs(misubs, profiles) {
     try {
         // 数据预验证
         if (!Array.isArray(misubs) || !Array.isArray(profiles)) {
-            return { success: false, message: '数据格式错误：misubs 和 profiles 必须是数组' };
+            return {
+                success: false,
+                error: t('settings.dataFormatInvalid'),
+                errorType: 'validation',
+            };
         }
 
-        const response = await fetch('/api/misubs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            // 将 misubs 和 profiles 一起发送
-            body: JSON.stringify({ misubs, profiles })
-        });
-
-        // 检查HTTP状态码
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const errorMessage = errorData.message || errorData.error || `服务器错误 (${response.status})`;
-            return { success: false, message: errorMessage };
-        }
-
-        return await response.json();
+        return await api.post('/api/misubs', { misubs, profiles });
     } catch (error) {
-        console.error('saveMisubs 网络请求失败:', error);
-
-        // 根据错误类型返回更具体的错误信息
-        if (error.name === 'TypeError' && error.message.includes('fetch')) {
-            return { success: false, message: '网络连接失败，请检查网络连接' };
-        } else if (error.name === 'SyntaxError') {
-            return { success: false, message: '服务器响应格式错误' };
-        } else {
-            return { success: false, message: `网络请求失败: ${error.message}` };
-        }
+        return handleApiError(error, 'saveMisubs');
     }
 }
 
-export async function fetchNodeCount(subUrl) {
+export async function fetchNodeCount(subUrl, fetchProxy = '', plusAsSpace = false, userAgent = '') {
+    let timeoutId;
     try {
-        const res = await fetch('/api/node_count', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: subUrl })
-        });
-        const data = await res.json();
-        return data; // [修正] 直接返回整个对象 { count, userInfo }
-    } catch (e) {
-        console.error('fetchNodeCount error:', e);
-        return { count: 0, userInfo: null };
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 60000); // 60秒超时
+
+        const payload = { url: subUrl };
+        if (fetchProxy) {
+            payload.fetchProxy = fetchProxy;
+        }
+        if (plusAsSpace) {
+            payload.plusAsSpace = true;
+        }
+        if (userAgent) {
+            payload.userAgent = userAgent;
+        }
+
+        const data = await api.post('/api/node_count', payload, { signal: controller.signal });
+
+        if (data?.success === false) {
+            return normalizeApiFailure(data, t('settings.updateNodeInfoFailed'));
+        }
+
+        return { success: true, data }; // data 包含 { count, userInfo }
+    } catch (error) {
+        return handleApiError(error, 'fetchNodeCount');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
 export async function fetchSettings() {
     try {
-        const response = await fetch('/api/settings');
-        if (!response.ok) return {};
-        return await response.json();
+        const data = await api.get(`/api/settings?t=${Date.now()}`);
+        return { success: true, data };
     } catch (error) {
-        console.error("Failed to fetch settings:", error);
-        return {};
+        return handleApiError(error, 'fetchSettings');
+    }
+}
+
+export async function fetchPublicConfig() {
+    let timeoutId;
+    try {
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 8000);
+        const headers =
+            typeof window !== 'undefined' && window.location?.pathname
+                ? { 'X-MiSub-Path': window.location.pathname }
+                : undefined;
+        const data = await api.get('/api/public_config', {
+            signal: controller.signal,
+            headers,
+        });
+        return { success: true, data };
+    } catch (error) {
+        return handleApiError(error, 'fetchPublicConfig');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
 export async function saveSettings(settings) {
     try {
-        const response = await fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings)
-        });
-
-        // 检查HTTP状态码
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const errorMessage = errorData.message || errorData.error || `服务器错误 (${response.status})`;
-            return { success: false, message: errorMessage };
-        }
-
-        return await response.json();
+        return await api.post('/api/settings', settings);
     } catch (error) {
-        console.error('saveSettings 网络请求失败:', error);
+        return handleApiError(error, 'saveSettings');
+    }
+}
 
-        // 根据错误类型返回更具体的错误信息
-        if (error.name === 'TypeError' && error.message.includes('fetch')) {
-            return { success: false, message: '网络连接失败，请检查网络连接' };
-        } else if (error.name === 'SyntaxError') {
-            return { success: false, message: '服务器响应格式错误' };
-        } else {
-            return { success: false, message: `网络请求失败: ${error.message}` };
-        }
+/**
+ * 恢复出厂设置（仅限设置项，不删除节点和订阅组）
+ * @returns {Promise<Object>} - 重置结果
+ */
+export async function resetSettings() {
+    try {
+        return await api.post('/api/settings/reset');
+    } catch (error) {
+        return handleApiError(error, 'resetSettings');
     }
 }
 
@@ -129,24 +223,26 @@ export async function saveSettings(settings) {
  * @returns {Promise<Object>} - 更新结果
  */
 export async function batchUpdateNodes(subscriptionIds) {
+    let timeoutId;
     try {
-        const response = await fetch('/api/batch_update_nodes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subscriptionIds })
-        });
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 120000); // 120秒超时
 
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const errorMessage = errorData.message || errorData.error || `服务器错误 (${response.status})`;
-            return { success: false, message: errorMessage };
+        const result = await api.post(
+            '/api/batch_update_nodes',
+            { subscriptionIds },
+            { signal: controller.signal }
+        );
+
+        if (result?.success === false) {
+            return normalizeApiFailure(result, '批量更新节点信息失败');
         }
 
-        const result = await response.json();
         return result;
     } catch (error) {
-        console.error("Failed to batch update nodes:", error);
-        return { success: false, message: '网络请求失败，请检查网络连接' };
+        return handleApiError(error, 'batchUpdateNodes');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
@@ -156,22 +252,67 @@ export async function batchUpdateNodes(subscriptionIds) {
  */
 export async function migrateToD1() {
     try {
-        const response = await fetch('/api/migrate_to_d1', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const errorMessage = errorData.message || errorData.error || `服务器错误 (${response.status})`;
-            return { success: false, message: errorMessage };
-        }
-
-        const result = await response.json();
-        return result;
+        return await api.post('/api/migrate_to_d1');
     } catch (error) {
-        console.error("Failed to migrate to D1:", error);
-        return { success: false, message: '网络请求失败，请检查网络连接' };
+        if (error instanceof APIError) {
+            return {
+                success: false,
+                error: error.message,
+                errorType: 'server',
+                details: error.data?.details || error.data?.errors,
+            };
+        }
+        return handleApiError(error, 'migrateToD1');
+    }
+}
+
+export async function detectLegacyD1() {
+    try {
+        return await api.get('/api/detect_legacy_d1');
+    } catch (error) {
+        return handleApiError(error, 'detectLegacyD1');
+    }
+}
+
+export async function migrateLegacyD1() {
+    try {
+        return await api.post('/api/migrate_legacy_d1');
+    } catch (error) {
+        if (error instanceof APIError) {
+            return {
+                success: false,
+                error: error.message,
+                errorType: 'server',
+                details: error.data?.details || error.data?.errors,
+            };
+        }
+        return handleApiError(error, 'migrateLegacyD1');
+    }
+}
+
+export async function fetchGithubLatestRelease(repo) {
+    try {
+        return await api.get(`/api/github/release?repo=${encodeURIComponent(repo)}`);
+    } catch (error) {
+        return handleApiError(error, 'fetchGithubLatestRelease');
+    }
+}
+
+export async function testSubconverterBackend(backend, target = 'clash') {
+    let timeoutId;
+    try {
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 30000);
+        const data = await api.post(
+            '/api/subconverter/test',
+            { backend, target },
+            { signal: controller.signal }
+        );
+        return data;
+    } catch (error) {
+        return handleApiError(error, 'testSubconverterBackend');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
@@ -183,22 +324,8 @@ export async function migrateToD1() {
  */
 export async function testSubscription(url, userAgent) {
     try {
-        const response = await fetch('/api/debug_subscription', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, userAgent })
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const errorMessage = errorData.message || errorData.error || `服务器错误 (${response.status})`;
-            return { success: false, message: errorMessage };
-        }
-
-        const result = await response.json();
-        return result;
+        return await api.post('/api/debug_subscription', { url, userAgent });
     } catch (error) {
-        console.error("Failed to test subscription:", error);
-        return { success: false, message: '网络请求失败，请检查网络连接' };
+        return handleApiError(error, 'testSubscription');
     }
 }

@@ -1,270 +1,462 @@
 // FILE: src/composables/useManualNodes.js
 import { ref, computed, watch } from 'vue';
-import { useToastStore } from '../stores/toast'; // 引入 Toast
+import { storeToRefs } from 'pinia';
+import { useDataStore } from '../stores/useDataStore.js';
+import { useSettingsStore } from '../stores/settings.js';
+import { useToastStore } from '../stores/toast.js'; // Restored
+import { extractNodeName, extractHostAndPort } from '../lib/utils.js';
+import { pingNode } from '../utils/ping.js';
+import { filterManualNodes, isManualNodeEntry } from './manual-nodes/filters.js';
+import { readRawPreference, writeRawPreference } from '../utils/local-preference.js';
+import { buildDedupPlan as buildDedupPlanCore } from './manual-nodes/dedup.js';
+import { buildAutoSortedSubscriptions } from './manual-nodes/sorting.js';
+import {
+    collectManualNodeGroups,
+    buildGroupedManualNodes,
+    normalizeManualNodeGroupName,
+} from './manual-nodes/groups.js';
+import { t } from '../i18n/index.js';
 
-export function useManualNodes(initialNodesRef, markDirty) {
-  const { showToast } = useToastStore(); // 获取 showToast 函数
-  const manualNodes = ref([]);
-  const manualNodesCurrentPage = ref(1);
-  const manualNodesPerPage = 24;
+export function useManualNodes(markDirty) {
+    const { showToast } = useToastStore();
+    const dataStore = useDataStore();
+    const settingsStore = useSettingsStore();
+    const { subscriptions: allSubscriptions } = storeToRefs(dataStore);
 
-  const searchTerm = ref('');
+    // Manual Nodes are items in subscriptions that are NOT http/https
+    // We filter from the shared store state
+    // [FIX] 添加更严格的验证,确保只识别有效的手工节点
+    const manualNodes = computed(() => {
+        return (allSubscriptions.value || []).filter(isManualNodeEntry);
+    });
 
-  // 国家/地区代码到旗帜和中文名称的映射
-  const countryCodeMap = {
-    'hk': ['🇭🇰', '香港', 'HK'],
-    'tw': ['🇹🇼', '台湾', '臺灣'],
-    'sg': ['🇸🇬', '新加坡', '狮城'],
-    'jp': ['🇯🇵', '日本'],
-    'us': ['🇺🇸', '美国', '美國'],
-    'kr': ['🇰🇷', '韩国', '韓國'],
-    'gb': ['🇬🇧', '英国', '英國'],
-    'de': ['🇩🇪', '德国', '德國'],
-    'fr': ['🇫🇷', '法国', '法國'],
-    'ca': ['🇨🇦', '加拿大'],
-    'au': ['🇦🇺', '澳大利亚', '澳洲', '澳大利亞'],
-    'cn': ['🇨🇳', '中国', '大陸', '内地'],
-    'my': ['🇲🇾', '马来西亚', '馬來西亞'],
-    'th': ['🇹🇭', '泰国', '泰國'],
-    'vn': ['🇻🇳', '越南'],
-    'ph': ['🇵🇭', '菲律宾', '菲律賓'],
-    'id': ['🇮🇩', '印度尼西亚', '印尼'],
-    'in': ['🇮🇳', '印度'],
-    'pk': ['🇵🇰', '巴基斯坦'],
-    'bd': ['🇧🇩', '孟加拉国', '孟加拉國'],
-    'ae': ['🇦🇪', '阿联酋', '阿聯酋'],
-    'sa': ['🇸🇦', '沙特阿拉伯'],
-    'tr': ['🇹🇷', '土耳其'],
-    'ru': ['🇷🇺', '俄罗斯', '俄羅斯'],
-    'br': ['🇧🇷', '巴西'],
-    'mx': ['🇲🇽', '墨西哥'],
-    'ar': ['🇦🇷', '阿根廷'],
-    'cl': ['🇨🇱', '智利'],
-    'za': ['🇿🇦', '南非'],
-    'eg': ['🇪🇬', '埃及'],
-    'ng': ['🇳🇬', '尼日利亚', '尼日利亞'],
-    'ke': ['🇰🇪', '肯尼亚', '肯尼亞'],
-    'il': ['🇮🇱', '以色列'],
-    'ir': ['🇮🇷', '伊朗'],
-    'iq': ['🇮🇶', '伊拉克'],
-    'ua': ['🇺🇦', '乌克兰', '烏克蘭'],
-    'pl': ['🇵🇱', '波兰', '波蘭'],
-    'cz': ['🇨🇿', '捷克'],
-    'hu': ['🇭🇺', '匈牙利'],
-    'ro': ['🇷🇴', '罗马尼亚', '羅馬尼亞'],
-    'gr': ['🇬🇷', '希腊', '希臘'],
-    'pt': ['🇵🇹', '葡萄牙'],
-    'es': ['🇪🇸', '西班牙'],
-    'it': ['🇮🇹', '意大利'],
-    'nl': ['🇳🇱', '荷兰', '荷蘭'],
-    'be': ['🇧🇪', '比利时', '比利時'],
-    'se': ['🇸🇪', '瑞典'],
-    'no': ['🇳🇴', '挪威'],
-    'dk': ['🇩🇰', '丹麦', '丹麥'],
-    'fi': ['🇫🇮', '芬兰', '芬蘭'],
-    'ch': ['🇨🇭', '瑞士'],
-    'at': ['🇦🇹', '奥地利', '奧地利'],
-    'ie': ['🇮🇪', '爱尔兰', '愛爾蘭'],
-    'nz': ['🇳🇿', '新西兰', '紐西蘭'],
-  };
+    const manualNodesCurrentPage = ref(1);
+    // 走共享助手：站点存储被禁用时裸读会抛 SecurityError，导致整个组合式函数起不来
+    const manualNodesPerPage = ref(parseInt(readRawPreference('manualNodesPPS'), 10) || 24);
+    const searchTerm = ref('');
 
-  function initializeManualNodes(nodesData) {
-    manualNodes.value = (nodesData || []).map(node => ({
-      ...node,
-      id: node.id || crypto.randomUUID(),
-      enabled: node.enabled ?? true,
-    }));
-  }
+    watch(manualNodesPerPage, (newVal) => {
+        writeRawPreference('manualNodesPPS', newVal);
+        manualNodesCurrentPage.value = 1;
+    });
 
-  // [新增] 根据搜索词过滤节点
-  const filteredManualNodes = computed(() => {
-    if (!searchTerm.value) {
-      return manualNodes.value;
+    const activeGroupFilter = ref(null); // null = all, or group name string
+
+    const filteredManualNodes = computed(() => {
+        return filterManualNodes(manualNodes.value, searchTerm.value, activeGroupFilter.value);
+    });
+
+    const manualNodesTotalPages = computed(() => {
+        if (manualNodesPerPage.value === -1) return 1; // All
+        return Math.ceil(filteredManualNodes.value.length / manualNodesPerPage.value);
+    });
+
+    const paginatedManualNodes = computed(() => {
+        if (manualNodesPerPage.value === -1) return filteredManualNodes.value;
+        const start = (manualNodesCurrentPage.value - 1) * manualNodesPerPage.value;
+        const end = start + manualNodesPerPage.value;
+        return filteredManualNodes.value.slice(start, end);
+    });
+
+    const enabledManualNodes = computed(() => manualNodes.value.filter((n) => n.enabled));
+
+    function changeManualNodesPage(page) {
+        let p = parseInt(page);
+        if (isNaN(p)) p = 1;
+        if (p < 1) p = 1;
+        if (p > manualNodesTotalPages.value) p = manualNodesTotalPages.value;
+        manualNodesCurrentPage.value = p;
     }
-    const searchQuery = searchTerm.value.toLowerCase().trim();
-    
-    const filtered = manualNodes.value.filter(node => {
-      if (!node.name) return false;
-      
-      const nodeName = node.name.toLowerCase();
-      
-      // 直接搜索匹配
-      if (nodeName.includes(searchQuery)) {
-        return true;
-      }
-      
-      // 获取可能的替代搜索词（国家代码映射）
-      const alternativeTerms = countryCodeMap[searchQuery] || [];
-      
-      // 检查节点名称是否包含任何替代词
-      for (const altTerm of alternativeTerms) {
-        if (nodeName.includes(altTerm.toLowerCase())) {
-          return true;
+
+    function setGroupFilter(group) {
+        activeGroupFilter.value = group;
+        manualNodesCurrentPage.value = 1; // Reset to page 1
+    }
+
+    function batchUpdateGroup(nodeIds, groupName) {
+        if (!nodeIds || nodeIds.length === 0) return;
+        const normalizedGroupName = normalizeManualNodeGroupName(groupName);
+        const idsSet = new Set(nodeIds);
+        const updates = manualNodes.value
+            .filter((n) => idsSet.has(n.id))
+            .map((n) => {
+                // Only update if changed after normalization
+                if (normalizeManualNodeGroupName(n.group) === normalizedGroupName) return null;
+                return { id: n.id, updates: { ...n, group: normalizedGroupName } };
+            })
+            .filter((u) => u);
+
+        if (updates.length > 0) {
+            updates.forEach(({ id, updates }) => {
+                dataStore.updateSubscription(id, updates);
+            });
+            markDirty();
+            showToast(
+                t('manualNodes.movedToGroup', {
+                    count: updates.length,
+                    group: normalizedGroupName || t('manualNodes.defaultGroup'),
+                }),
+                'success'
+            );
         }
-      }
-      
-      return false;
+    }
+
+    function batchDeleteNodes(nodeIds) {
+        if (!nodeIds || nodeIds.length === 0) return;
+        // Confirmation moved to UI layer
+
+        nodeIds.forEach((id) => {
+            dataStore.removeSubscription(id);
+        });
+        // 清理组合订阅中对这些节点的引用
+        dataStore.removeManualNodeFromProfiles(nodeIds);
+
+        // Adjust pagination if needed
+        if (paginatedManualNodes.value.length === 0 && manualNodesCurrentPage.value > 1) {
+            manualNodesCurrentPage.value--;
+        }
+
+        markDirty();
+        showToast(t('manualNodes.deletedCount', { count: nodeIds.length }), 'success');
+    }
+
+    function addNode(node) {
+        const normalizedNode = {
+            ...node,
+            group: normalizeManualNodeGroupName(node.group),
+        };
+        if (!normalizedNode.name) {
+            normalizedNode.name = extractNodeName(normalizedNode.url);
+        }
+        // Add to shared store
+        dataStore.addSubscription(normalizedNode);
+        manualNodesCurrentPage.value = 1;
+        markDirty();
+    }
+
+    function updateNode(updatedNode) {
+        const normalizedNode = {
+            ...updatedNode,
+            group: normalizeManualNodeGroupName(updatedNode.group),
+        };
+        // Update in shared store
+        dataStore.updateSubscription(normalizedNode.id, normalizedNode);
+        markDirty();
+    }
+
+    function deleteNode(nodeId) {
+        dataStore.removeSubscription(nodeId);
+        // 清理组合订阅中对该节点的引用
+        dataStore.removeManualNodeFromProfiles(nodeId);
+        if (paginatedManualNodes.value.length === 0 && manualNodesCurrentPage.value > 1) {
+            manualNodesCurrentPage.value--;
+        }
+        markDirty();
+    }
+
+    function deleteAllNodes() {
+        // Only remove proper manual nodes (not subscriptions)
+        const idsToRemove = manualNodes.value.map((n) => n.id);
+
+        // 如果没有节点，提示并返回
+        if (idsToRemove.length === 0) {
+            showToast(t('manualNodes.noNodesToDelete'), 'info');
+            return;
+        }
+
+        idsToRemove.forEach((id) => dataStore.removeSubscription(id));
+        // 清理组合订阅中对这些节点的引用
+        dataStore.removeManualNodeFromProfiles(idsToRemove);
+
+        manualNodesCurrentPage.value = 1;
+        markDirty();
+        showToast(t('manualNodes.clearedCount', { count: idsToRemove.length }), 'success');
+    }
+
+    function addNodesFromBulk(nodes, groupName = '') {
+        const normalizedGroupName = normalizeManualNodeGroupName(groupName);
+        // Reverse insert so they appear in correct order when unshifted
+        for (let i = nodes.length - 1; i >= 0; i--) {
+            const node = { ...nodes[i] };
+            node.group = normalizeManualNodeGroupName(normalizedGroupName || node.group);
+            dataStore.addSubscription(node);
+        }
+        markDirty();
+    }
+
+    const buildDedupPlan = () => buildDedupPlanCore(manualNodes.value);
+
+    function applyDedupPlan(plan) {
+        if (!plan || !plan.removeNodes || plan.removeNodes.length === 0) {
+            showToast(t('manualNodes.noDuplicates'), 'info');
+            return;
+        }
+
+        plan.removeNodes.forEach((node) => dataStore.removeSubscription(node.id));
+        showToast(
+            t('manualNodes.removedDuplicates', { count: plan.removeNodes.length }),
+            'success'
+        );
+        markDirty();
+        manualNodesCurrentPage.value = 1;
+    }
+
+    function deduplicateNodes() {
+        const plan = buildDedupPlan();
+        applyDedupPlan(plan);
+    }
+
+    function autoSortNodes() {
+        // Sort logic requires replacing the list.
+        // Since manual nodes are part of a larger list (subscriptions), we need to extract them, sort them,
+        // and then potentially re-insert them or just update their order relative to themselves?
+        // The store's 'subscriptions' array is mixed.
+        // If we want to sort ONLY manual nodes but keep subscriptions in place...
+        // It's complex because we don't track indices separately easily.
+        // Approach: Extract all Manual Nodes, Sort them, Extract all Subscriptions (keep order),
+        // Then Combine: [Subscriptions..., SortedManualNodes...]
+        // This effectively moves all manual nodes to the bottom. This is acceptable/expected behavior.
+
+        const mergedList = buildAutoSortedSubscriptions(
+            allSubscriptions.value || [],
+            manualNodes.value
+        );
+
+        // Update store with new order: Manual Nodes first, then Subscriptions
+        dataStore.overwriteSubscriptions(mergedList);
+
+        manualNodesCurrentPage.value = 1;
+        markDirty();
+    }
+
+    /**
+     * 按延迟排序：延迟低的在前。
+     * - 只排序已测出延迟（status === 'ok'）的节点
+     * - 未测出延迟/失败的节点排在最后（保持原有相对顺序）
+     * - 与地区排序不同，这里只对节点重排，订阅源位置不受影响
+     * @returns {boolean} 是否成功排序（无延迟数据时返回 false）
+     */
+    function sortNodesByLatency() {
+        const results = pingResults.value || {};
+        const hasAnyLatency = Object.values(results).some(
+            (item) => item && item.status === 'ok' && Number.isFinite(item.latency)
+        );
+        if (!hasAnyLatency) return false;
+
+        const nodes = [...manualNodes.value];
+        const latencyOf = (node) => {
+            const r = results[node.id];
+            return r && r.status === 'ok' && Number.isFinite(r.latency) ? r.latency : Infinity;
+        };
+
+        nodes.sort((a, b) => {
+            const la = latencyOf(a);
+            const lb = latencyOf(b);
+            if (la !== lb) return la - lb;
+            // 延迟相同（或都未测出）时保持名称稳定排序
+            return (a.name || '').localeCompare(b.name || '', 'zh-CN');
+        });
+
+        const otherItems = (allSubscriptions.value || []).filter(
+            (item) => !nodes.some((n) => n.id === item.id)
+        );
+        dataStore.overwriteSubscriptions([...nodes, ...otherItems]);
+
+        manualNodesCurrentPage.value = 1;
+        markDirty();
+        return true;
+    }
+
+    watch(searchTerm, (newValue, oldValue) => {
+        if (newValue !== oldValue) {
+            manualNodesCurrentPage.value = 1;
+        }
     });
-    
-    return filtered;
-  });
-  
-  // 保持原始节点数据不变，用于显示总数等
-  const originalManualNodes = computed(() => manualNodes.value);
-  
-  const manualNodesTotalPages = computed(() => Math.ceil(filteredManualNodes.value.length / manualNodesPerPage));
 
-  // [修改] 分页使用过滤后的节点
-  const paginatedManualNodes = computed(() => {
-    const start = (manualNodesCurrentPage.value - 1) * manualNodesPerPage;
-    const end = start + manualNodesPerPage;
-    return filteredManualNodes.value.slice(start, end);
-  });
-  
-  const enabledManualNodes = computed(() => manualNodes.value.filter(n => n.enabled));
+    function reorderManualNodes(newOrder) {
+        const currentManualNodes = manualNodes.value;
+        const reorderedVisibleNodes = [...(newOrder || [])];
+        const newOrderIds = new Set(reorderedVisibleNodes.map((node) => node.id));
+        const orderedManualNodes =
+            newOrderIds.size > 0 && newOrderIds.size < currentManualNodes.length
+                ? currentManualNodes.map((node) => {
+                      if (!newOrderIds.has(node.id)) return node;
+                      return reorderedVisibleNodes.shift();
+                  })
+                : reorderedVisibleNodes;
 
-  function changeManualNodesPage(page) {
-    if (page < 1 || page > manualNodesTotalPages.value) return;
-    manualNodesCurrentPage.value = page;
-  }  
+        // 1. Get all Subscriptions (to preserve them)
+        const currentSubscriptions = (allSubscriptions.value || []).filter(
+            (item) => item.url && /^https?:\/\//.test(item.url)
+        );
 
-  function addNode(node) {
-    manualNodes.value.unshift(node);
-    manualNodesCurrentPage.value = 1;
-    markDirty();
-  }
+        // 2. Combine Existing Subscriptions + New Ordered Manual Nodes
+        // Logic: Manual Nodes at top, Subscriptions at bottom
+        const mergedList = [...orderedManualNodes, ...currentSubscriptions];
 
-  function updateNode(updatedNode) {
-    const index = manualNodes.value.findIndex(n => n.id === updatedNode.id);
-    if (index !== -1) {
-      manualNodes.value[index] = updatedNode;
-      markDirty();
+        // 3. Update Store
+        dataStore.overwriteSubscriptions(mergedList);
+
+        // 4. Mark Dirty
+        markDirty();
     }
-  }
 
-  function deleteNode(nodeId) {
-    manualNodes.value = manualNodes.value.filter(n => n.id !== nodeId);
-    if (paginatedManualNodes.value.length === 0 && manualNodesCurrentPage.value > 1) {
-      manualNodesCurrentPage.value--;
-    }
-    markDirty();
-  }
-
-  function deleteAllNodes() {
-    manualNodes.value = [];
-    manualNodesCurrentPage.value = 1;
-    markDirty();
-  }
-
-  function addNodesFromBulk(nodes) {
-    manualNodes.value.unshift(...nodes);
-    markDirty();
-  }
-  const getUniqueKey = (url) => {
-    try {
-      if (url.startsWith('vmess://')) {
-        const base64Part = url.substring('vmess://'.length);
-        
-        // 关键步骤：解码后，移除所有空白字符，解决格式不一致问题
-        const decodedString = atob(base64Part);
-        const cleanedString = decodedString.replace(/\s/g, ''); // 移除所有空格、换行等
-        
-        const nodeConfig = JSON.parse(cleanedString);
-        
-        delete nodeConfig.ps;
-        delete nodeConfig.remark;
-        
-        // 重新序列化对象，并以此作为唯一键
-        // 通过排序键来确保即使字段顺序不同也能得到相同的结果
-        return 'vmess://' + JSON.stringify(Object.keys(nodeConfig).sort().reduce(
-          (obj, key) => { 
-            obj[key] = nodeConfig[key]; 
-            return obj;
-          }, 
-          {}
-        ));
-      }
-      // 对于其他协议，简单地移除 # 后面的部分
-      const hashIndex = url.indexOf('#');
-      return hashIndex !== -1 ? url.substring(0, hashIndex) : url;
-    } catch (e) {
-      console.error('生成节点唯一键失败，将使用原始URL:', url, e);
-      // 如果解析失败，回退到使用原始URL，避免程序崩溃
-      return url;
-    }
-  };
-
-  function deduplicateNodes() {
-    const originalCount = manualNodes.value.length;
-    const seenKeys = new Set();
-    const uniqueNodes = [];
-
-    for (const node of manualNodes.value) {
-      // 使用新的、更智能的函数来生成唯一键
-      const uniqueKey = getUniqueKey(node.url);
-      
-      if (!seenKeys.has(uniqueKey)) {
-        seenKeys.add(uniqueKey);
-        uniqueNodes.push(node);
-      }
-    }
-    
-    manualNodes.value = uniqueNodes;
-    const removedCount = originalCount - uniqueNodes.length;
-
-    if (removedCount > 0) {
-      showToast(`成功移除 ${removedCount} 个重复节点，请记得保存。`, 'success');
-      markDirty();
-    } else {
-      showToast('没有发现重复的节点。', 'info');
-    }
-  }
-
-  function autoSortNodes() {
-    const regionKeywords = { HK: [/香港/,/HK/,/Hong Kong/i], TW: [/台湾/,/TW/,/Taiwan/i], SG: [/新加坡/,/SG/,/狮城/,/Singapore/i], JP: [/日本/,/JP/,/Japan/i], US: [/美国/,/US/,/United States/i], KR: [/韩国/,/KR/,/Korea/i], GB: [/英国/,/GB/,/UK/,/United Kingdom/i], DE: [/德国/,/DE/,/Germany/i], FR: [/法国/,/FR/,/France/i], CA: [/加拿大/,/CA/,/Canada/i], AU: [/澳大利亚/,/AU/,/Australia/i], };
-    const regionOrder = ['HK', 'TW', 'SG', 'JP', 'US', 'KR', 'GB', 'DE', 'FR', 'CA', 'AU'];
-    const getRegionCode = (name) => { for (const code in regionKeywords) { for (const keyword of regionKeywords[code]) { if (keyword.test(name)) return code; } } return 'ZZ'; };
-    
-    manualNodes.value.sort((a, b) => {
-        const regionA = getRegionCode(a.name);
-        const regionB = getRegionCode(b.name);
-        const indexA = regionOrder.indexOf(regionA);
-        const indexB = regionOrder.indexOf(regionB);
-        const effectiveIndexA = indexA === -1 ? Infinity : indexA;
-        const effectiveIndexB = indexB === -1 ? Infinity : indexB;
-        if (effectiveIndexA !== effectiveIndexB) return effectiveIndexA - effectiveIndexB;
-        return a.name.localeCompare(b.name, 'zh-CN');
+    const manualNodeGroups = computed(() => {
+        const customOrder = settingsStore.config.manualNodeGroupOrder || [];
+        return collectManualNodeGroups(manualNodes.value, customOrder);
     });
-    // [修正] 只標記為 dirty，不呼叫 handleSave
-    markDirty();
-  }
 
-  // [新增] 监听搜索词变化，重置分页
-  watch(searchTerm, (newValue, oldValue) => {
-    // 只在搜索词实际改变时重置分页
-    if (newValue !== oldValue) {
-      manualNodesCurrentPage.value = 1;
+    const groupedManualNodes = computed(() => {
+        return buildGroupedManualNodes(filteredManualNodes.value, manualNodeGroups.value);
+    });
+
+    function renameGroup(oldName, newName) {
+        const normalizedOldName = normalizeManualNodeGroupName(oldName);
+        const normalizedNewName = normalizeManualNodeGroupName(newName);
+        if (!normalizedOldName || !normalizedNewName || normalizedOldName === normalizedNewName)
+            return;
+
+        const nodesInGroup = manualNodes.value.filter(
+            (n) => normalizeManualNodeGroupName(n.group) === normalizedOldName
+        );
+        nodesInGroup.forEach((node) => {
+            dataStore.updateSubscription(node.id, { ...node, group: normalizedNewName });
+        });
+
+        // 同步更新自定义分组顺序
+        const customOrder = settingsStore.config.manualNodeGroupOrder || [];
+        const index = customOrder.indexOf(normalizedOldName);
+        if (index !== -1) {
+            const newOrder = [...customOrder];
+            newOrder[index] = normalizedNewName;
+            settingsStore.updateConfig({ manualNodeGroupOrder: newOrder });
+        }
+
+        markDirty();
     }
-  });
 
-  watch(initialNodesRef, (newInitialNodes) => {
-    initializeManualNodes(newInitialNodes);
-  }, { immediate: true, deep: true });
+    function deleteGroup(groupName) {
+        const normalizedGroupName = normalizeManualNodeGroupName(groupName);
+        if (!normalizedGroupName) return;
+        // Ungroup nodes (move to default)
+        const nodesInGroup = manualNodes.value.filter(
+            (n) => normalizeManualNodeGroupName(n.group) === normalizedGroupName
+        );
+        nodesInGroup.forEach((node) => {
+            // Creating a copy logic is safe here as updateSubscription handles it
+            const { group, ...rest } = node;
+            dataStore.updateSubscription(node.id, { ...rest, group: '' }); // Set to empty string or remove property
+        });
 
-  return {
-    manualNodes: originalManualNodes, // 返回原始数据，不经过搜索过滤
-    manualNodesCurrentPage,
-    manualNodesTotalPages,
-    paginatedManualNodes, // 这个已经经过搜索过滤和分页
-    enabledManualNodesCount: computed(() => enabledManualNodes.value.length),
-    searchTerm, // [新增] 导出搜索词
-    changeManualNodesPage,
-    addNode,
-    updateNode,
-    deleteNode,
-    deleteAllNodes,
-    addNodesFromBulk,
-    autoSortNodes,
-    deduplicateNodes, // 导出新函数
-  };
+        // 从自定义分组顺序中移除
+        const customOrder = settingsStore.config.manualNodeGroupOrder || [];
+        const newOrder = customOrder.filter((g) => g !== normalizedGroupName);
+        if (newOrder.length !== customOrder.length) {
+            settingsStore.updateConfig({ manualNodeGroupOrder: newOrder });
+        }
+
+        markDirty();
+    }
+
+    function reorderGroups(newOrder) {
+        // 保存用户自定义的分组顺序
+        settingsStore.updateConfig({ manualNodeGroupOrder: newOrder });
+        markDirty();
+    }
+
+    // --- 连通性测试 (Ping) ---
+    const pingResults = ref({}); // { [nodeId]: { status: 'ok'|'error'|'timeout', latency: 120 } }
+    const pingingNodes = ref(new Set());
+
+    async function pingNodeId(nodeId) {
+        if (pingingNodes.value.has(nodeId)) return;
+        const node = manualNodes.value.find((n) => n.id === nodeId);
+        if (!node) return;
+
+        const { host, port } = extractHostAndPort(node.url);
+        if (!host || !port) {
+            pingResults.value[nodeId] = {
+                status: 'error',
+                latency: -1,
+                message: t('manualNodes.parseAddressFailed'),
+            };
+            return;
+        }
+
+        pingingNodes.value.add(nodeId);
+        pingResults.value = { ...pingResults.value, [nodeId]: { status: 'loading', latency: 0 } };
+
+        try {
+            // 由于 fetch ping 主要看 tcp 连通性，给个 3000ms 兜底即可
+            const result = await pingNode(host, port, 3000);
+            pingResults.value = { ...pingResults.value, [nodeId]: result };
+        } catch (e) {
+            pingResults.value = {
+                ...pingResults.value,
+                [nodeId]: { status: 'error', latency: -1 },
+            };
+        } finally {
+            pingingNodes.value.delete(nodeId);
+        }
+    }
+
+    // 批量并发测试所有开启的手动节点
+    async function pingAllNodes() {
+        const nodesToTest = enabledManualNodes.value.map((n) => n.id);
+        if (nodesToTest.length === 0) return;
+
+        showToast(t('manualNodes.pingStarted', { count: nodesToTest.length }), 'info');
+
+        // 控制并发数 (比如最大 10 并发)
+        const CONCURRENCY = 10;
+        let currentIndex = 0;
+
+        const workers = Array(Math.min(CONCURRENCY, nodesToTest.length))
+            .fill(null)
+            .map(async () => {
+                while (currentIndex < nodesToTest.length) {
+                    const idx = currentIndex++;
+                    const nodeId = nodesToTest[idx];
+                    await pingNodeId(nodeId);
+                }
+            });
+
+        await Promise.allSettled(workers);
+        showToast(t('manualNodes.pingCompleted', { count: nodesToTest.length }), 'success');
+    }
+
+    return {
+        manualNodes, // Returns computed filtered list
+        manualNodeGroups,
+        groupedManualNodes,
+        manualNodesCurrentPage,
+        manualNodesTotalPages,
+        paginatedManualNodes,
+        enabledManualNodesCount: computed(() => enabledManualNodes.value.length),
+        searchTerm,
+        activeGroupFilter, // New
+        changeManualNodesPage,
+        addNode,
+        updateNode,
+        deleteNode,
+        deleteAllNodes,
+        addNodesFromBulk,
+        autoSortNodes,
+        sortNodesByLatency,
+        deduplicateNodes,
+        buildDedupPlan,
+        applyDedupPlan,
+        reorderManualNodes, // Added
+        renameGroup,
+        deleteGroup,
+        reorderGroups, // New: 调整分组顺序
+        setGroupFilter, // New
+        batchUpdateGroup, // New
+        batchDeleteNodes, // New
+        manualNodesPerPage, // Added
+        pingResults,
+        pingingNodes,
+        pingNodeId,
+        pingAllNodes,
+    };
 }

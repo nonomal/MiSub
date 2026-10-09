@@ -1,106 +1,99 @@
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
-import { VitePWA } from 'vite-plugin-pwa'
+import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  plugins: [
-    vue(),
-    VitePWA({
-      registerType: 'autoUpdate',
-      workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/api\..*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              networkTimeoutSeconds: 10,
-              cacheableResponse: {
-                statuses: [0, 200]
-              }
-            }
-          },
-          {
-            urlPattern: /.*\.(js|css|html)$/,
-            handler: 'StaleWhileRevalidate',
-            options: {
-              cacheName: 'static-cache'
-            }
-          }
-        ]
-      },
-      includeAssets: ['favicon.ico', 'robots.txt', 'icons/*.png'],
-      manifest: {
-        name: 'MiSub - 订阅转换器',
-        short_name: 'MiSub',
-        description: '基于 Cloudflare 的订阅转换和管理工具',
-        theme_color: '#4f46e5',
-        background_color: '#0f172a',
-        display: 'standalone',
-        orientation: 'portrait-primary',
-        scope: '/',
-        start_url: '/',
-        icons: [
-          {
-            src: '/icons/icon-72x72.png',
-            sizes: '72x72',
-            type: 'image/png'
-          },
-          {
-            src: '/icons/icon-96x96.png',
-            sizes: '96x96',
-            type: 'image/png'
-          },
-          {
-            src: '/icons/icon-128x128.png',
-            sizes: '128x128',
-            type: 'image/png'
-          },
-          {
-            src: '/icons/icon-144x144.png',
-            sizes: '144x144',
-            type: 'image/png'
-          },
-          {
-            src: '/icons/icon-152x152.png',
-            sizes: '152x152',
-            type: 'image/png'
-          },
-          {
-            src: '/icons/icon-192x192.png',
-            sizes: '192x192',
-            type: 'image/png'
-          },
-          {
-            src: '/icons/icon-384x384.png',
-            sizes: '384x384',
-            type: 'image/png'
-          },
-          {
-            src: '/icons/icon-512x512.png',
-            sizes: '512x512',
-            type: 'image/png'
-          }
-        ]
-      },
-      devOptions: {
-        enabled: true,
-        type: 'module'
-      }
-    })
-  ],
-  // 我们移除了所有 alias 配置
-  server: {
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
-      },
-      '/sub': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
-      }
-    }
-  }
-})
+    plugins: [
+        vue(),
+        tailwindcss(),
+        {
+            name: 'html-transform-rocket-loader',
+            transformIndexHtml(html) {
+                // 自动为所有 module script 添加 data-cfasync="false" 以防止 Cloudflare Rocket Loader 破坏加载
+                return html.replace(
+                    /<script type="module"/g,
+                    '<script type="module" data-cfasync="false"'
+                );
+            },
+        },
+    ],
+    // 性能优化构建配置
+    build: {
+        // 启用CSS代码分割
+        cssCodeSplit: true,
+        // 优化依赖预构建
+        commonjsOptions: {
+            include: [/node_modules/],
+        },
+        rollupOptions: {
+            output: {
+                // 手动代码分割（保守策略，避免循环依赖导致空白页）
+                manualChunks: {
+                    vue: ['vue'],
+                    router: ['vue-router'],
+                    pinia: ['pinia'],
+                },
+                // 优化文件名
+                chunkFileNames: 'assets/js/[name]-[hash].js',
+                entryFileNames: 'assets/js/[name]-[hash].js',
+                assetFileNames: (assetInfo) => {
+                    const info = assetInfo.name.split('.');
+                    const ext = info[info.length - 1];
+                    if (/\.(mp4|webm|ogg|mp3|wav|flac|aac)(\?.*)?$/i.test(assetInfo.name)) {
+                        return `assets/media/[name]-[hash][extname]`;
+                    }
+                    if (/\.(png|jpe?g|gif|svg)(\?.*)?$/i.test(assetInfo.name)) {
+                        return `assets/img/[name]-[hash][extname]`;
+                    }
+                    if (/\.(woff2?|eot|ttf|otf)(\?.*)?$/i.test(assetInfo.name)) {
+                        return `assets/fonts/[name]-[hash][extname]`;
+                    }
+                    return `assets/${ext}/[name]-[hash][extname]`;
+                },
+            },
+        },
+        // 压缩配置
+        minify: 'terser',
+
+        // terserOptions removed for debugging
+    },
+    // 开发服务器配置
+    server: {
+        proxy: {
+            '/api': {
+                target: 'http://127.0.0.1:8787',
+                changeOrigin: true,
+            },
+            '/sub/': {
+                target: 'http://127.0.0.1:8787',
+                changeOrigin: true,
+            },
+            '^/(?!@|api/|sub/|assets/|@vite/|src/|icons/|images/)[^/]+/[^/]+$': {
+                target: 'http://127.0.0.1:8787',
+                changeOrigin: true,
+            },
+            // Catch-all proxy removed to fix SPA fallback
+        },
+    },
+    // 依赖优化
+    optimizeDeps: {
+        include: ['vue', 'pinia'],
+    },
+    // 路径解析
+    resolve: {
+        alias: [
+            { find: '@', replacement: '/src' },
+            {
+                // vuedraggable 的 package.json main 指向 dist/vuedraggable.umd.min.js，
+                // 该 UMD 构建把 Vue 完整版（含 runtime compiler）一并打包，并在运行时
+                // 调用 registerRuntimeCompiler()。此后任何运行时模板字符串都会走
+                // new Function("Vue", code) 编译，在启用严格 CSP（无 unsafe-eval）的
+                // 部署上被拦截，抛 EvalError 并以错误提示弹窗暴露给用户。
+                // 改指向 ESM 源码（仅 import { h } from 'vue'），不再打包编译器。
+                // 见 tests/unit/runtime-compiler-csp.test.js
+                find: /^vuedraggable$/,
+                replacement: 'vuedraggable/src/vuedraggable',
+            },
+        ],
+    },
+});

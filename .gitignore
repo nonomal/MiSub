@@ -1,3 +1,10 @@
+CLAUDE.md
+wrangler.toml
+template.yaml
+edgeone.json
+
+
+progame/
 # Logs
 logs
 *.log
@@ -10,10 +17,24 @@ lerna-debug.log*
 # Build output
 dist
 dist-ssr
+dev-dist
 
 # Dependencies
 /node_modules/
+.pnp
+.pnp.js
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Cloudflare
 .wrangler/
+.dev.vars
+
 # IDEs and editors
 /.idea
 .project
@@ -23,5 +44,65 @@ dist-ssr
 .settings/
 *.sublime-workspace
 .vscode
-# Misc
+*.swp
+*.swo
+*~
+
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+.nyc_output
+
+# TypeScript
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Temporary folders
+tmp/
+temp/
+
+# Claude Code
+.claude/
+
+DOCKER_GUIDE.md
+AGENTS.md
+misub-agent.md
+
+# Local development and testing
+local-server.js
+local-server-full.js
+test-chrome-mcp.js
+test-new-protocols.js
+test-screenshots/
+.wrangler/
+.ace-tool/
+.agent/
+.shared/
+# Docker (Closed Source)
+docker/
+data/
+/brain/
+/scratch/
+
+# AI assistant workspace data
+.workbuddy-ai/
